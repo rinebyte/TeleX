@@ -35,7 +35,7 @@ class OutputAdapter:
             self._rich_log.write(Text(f"{prompt}{suffix}: ", style="cyan"))
             self._input_prompt = prompt
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             self._input_future = loop.create_future()
             result = await self._input_future
             self._input_future = None

@@ -18,6 +18,8 @@ if _project_root not in sys.path:
 from installer.instance_manager import InstanceConfig
 from installer.output_adapter import OutputAdapter
 
+log = logging.getLogger("telex.instance")
+
 
 class InstanceTab(Vertical):
     """A tab that runs a single TeleX instance."""
@@ -46,7 +48,6 @@ class InstanceTab(Vertical):
         super().__init__(**kwargs)
         self.config = config
         self.adapter: OutputAdapter | None = None
-        self.instance = None
         self._status = "disconnected"
 
     def compose(self) -> ComposeResult:
@@ -74,10 +75,11 @@ class InstanceTab(Vertical):
     @work(thread=False)
     async def _start_instance(self) -> None:
         """Start the TeleX instance as an async worker."""
-        from config import load_config, parse_proxy, SLEEP_THRESHOLD
+        from config import parse_proxy, SLEEP_THRESHOLD
         from db import Database
         from ratelimit import RateLimitState
-        from pyrogram import Client
+        from pyrogram import Client, raw
+        from pyrogram.errors import SessionPasswordNeeded, RPCError
 
         self.adapter.print(f"[cyan]Starting instance: {self.config.name}[/]")
         self._update_status("connecting", "yellow")
@@ -96,24 +98,70 @@ class InstanceTab(Vertical):
             str(work_dir / "telex"),
             api_id=self.config.api_id,
             api_hash=self.config.api_hash,
-            phone_number=self.config.phone,
             no_updates=True,
             sleep_threshold=SLEEP_THRESHOLD,
             **proxy_kwargs,
         )
 
         try:
-            await client.start()
+            # Use connect() instead of start() to avoid blocking input() on first login
+            is_authorized = await client.connect()
+
+            if not is_authorized:
+                # First login — manual auth flow via OutputAdapter
+                phone = self.config.phone
+                self.adapter.print("[yellow]Sending verification code...[/]")
+                try:
+                    sent_code = await client.send_code(phone)
+                except RPCError as e:
+                    self.adapter.print(f"[red]Failed to send code: {e}[/]")
+                    await client.disconnect()
+                    self._update_status("error", "red")
+                    return
+
+                self.adapter.print("[green]Code sent! Check your Telegram app.[/]")
+
+                signed_in = False
+                while not signed_in:
+                    code = await self.adapter.ask("Enter verification code")
+                    code = code.strip().replace(" ", "").replace("-", "")
+                    if not code:
+                        self.adapter.print("[red]Code cannot be empty.[/]")
+                        continue
+                    try:
+                        await client.sign_in(phone, sent_code.phone_code_hash, code)
+                        signed_in = True
+                    except SessionPasswordNeeded:
+                        pwd = await self.adapter.ask("Enter 2FA password")
+                        await client.check_password(pwd.strip())
+                        signed_in = True
+                    except RPCError as e:
+                        self.adapter.print(f"[red]{e}. Try again.[/]")
+
+            # Complete initialization (same as what Client.start() does after authorize)
+            try:
+                await client.invoke(raw.functions.updates.GetState())
+            except Exception:
+                pass
+            await client.initialize()
+
         except Exception as e:
-            self.adapter.print(f"[red]Failed to start: {e}[/]")
+            self.adapter.print(f"[red]Failed to connect: {e}[/]")
             self._update_status("error", "red")
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
             return
 
         self._update_status("connected", "green")
-        me = await client.get_me()
-        self.adapter.print(
-            f"[green]Logged in as {me.first_name or ''} (@{me.username or '—'})[/]"
-        )
+        try:
+            me = await client.get_me()
+            self.adapter.print(
+                f"[green]Logged in as {me.first_name or ''} (@{me.username or '—'})[/]"
+            )
+        except Exception:
+            self.adapter.print("[green]Connected.[/]")
 
         if proxy:
             self.adapter.print(
@@ -125,6 +173,7 @@ class InstanceTab(Vertical):
             await self._menu_loop(client, database, rate_limiter)
         except Exception as e:
             self.adapter.print(f"[red]Error: {e}[/]")
+            log.exception("Menu loop error for %s", self.config.name)
         finally:
             try:
                 await client.stop()
@@ -137,6 +186,8 @@ class InstanceTab(Vertical):
         import search
         import blast
         import groups
+        from pyrogram import enums
+        from pyrogram.errors import RPCError
 
         while True:
             self.adapter.print(
@@ -207,7 +258,8 @@ class InstanceTab(Vertical):
                 await groups.fetch_all_groups(client, self.adapter, db=database, rate_limiter=rate_limiter)
 
             elif choice == "4":
-                await groups.find_and_leave_restricted(client, self.adapter, db=database, rate_limiter=rate_limiter)
+                # Reimplement find_and_leave_restricted using adapter (avoids blocking Prompt.ask)
+                await self._find_and_leave_restricted(client, database, rate_limiter)
 
             elif choice == "5":
                 await groups.check_spam_status(client, self.adapter, db=database, rate_limiter=rate_limiter)
@@ -218,6 +270,76 @@ class InstanceTab(Vertical):
             elif choice == "0":
                 self.adapter.print("[yellow]Disconnecting...[/]")
                 break
+
+    async def _find_and_leave_restricted(self, client, database, rate_limiter):
+        """Textual-compatible version of find_and_leave_restricted."""
+        from pyrogram import enums
+        from pyrogram.errors import RPCError
+        from groups import _check_can_send
+
+        self.adapter.print("[yellow]Fetching groups...[/]")
+
+        all_groups = []
+        async for dialog in client.get_dialogs():
+            chat = dialog.chat
+            if chat.type in (enums.ChatType.GROUP, enums.ChatType.SUPERGROUP, enums.ChatType.CHANNEL):
+                all_groups.append(chat)
+
+        if not all_groups:
+            self.adapter.print("[red]No groups found.[/]")
+            return
+
+        self.adapter.print(f"[yellow]Checking send permissions for {len(all_groups)} groups...[/]")
+
+        restricted = []
+        for i, chat in enumerate(all_groups):
+            try:
+                if not await _check_can_send(client, chat, rate_limiter=rate_limiter):
+                    restricted.append(chat)
+            except Exception:
+                pass
+            if (i + 1) % 10 == 0:
+                self.adapter.print(f"[dim]Checked {i+1}/{len(all_groups)}...[/]")
+
+        if not restricted:
+            self.adapter.print("[green]All groups allow sending messages.[/]")
+            return
+
+        self.adapter.print(f"\n[yellow]Found {len(restricted)} restricted group(s):[/]")
+        for i, chat in enumerate(restricted, 1):
+            uname = f"@{chat.username}" if chat.username else "—"
+            self.adapter.print(f"  {i}. {chat.title or '—'} ({uname})")
+
+        sel = await self.adapter.ask("Select groups to leave (comma-separated or 'all')")
+        if sel.strip().lower() == "all":
+            selected = restricted
+        else:
+            try:
+                indices = [int(x.strip()) - 1 for x in sel.split(",")]
+                selected = [restricted[i] for i in indices if 0 <= i < len(restricted)]
+            except (ValueError, IndexError):
+                self.adapter.print("[red]Invalid selection.[/]")
+                return
+
+        if not selected:
+            self.adapter.print("[red]No groups selected.[/]")
+            return
+
+        confirm = await self.adapter.ask(f"Leave {len(selected)} group(s)? [y/n]")
+        if confirm.strip().lower() not in ("y", "yes"):
+            return
+
+        left = 0
+        for i, chat in enumerate(selected):
+            try:
+                await rate_limiter.call(lambda c=chat: client.leave_chat(c.id), self.adapter)
+                database.remove_group(chat.id)
+                self.adapter.print(f"  [green]✓[/] Left: {chat.title}")
+                left += 1
+            except RPCError as e:
+                self.adapter.print(f"  [red]✗ Failed: {chat.title} — {e}[/]")
+
+        self.adapter.print(f"\n[green]Left {left}/{len(selected)} groups.[/]")
 
     @on(Input.Submitted, "#input")
     def on_input_submitted(self, event: Input.Submitted) -> None:

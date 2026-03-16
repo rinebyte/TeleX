@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import logging
 
 from pyrogram import enums
 from pyrogram.errors import RPCError
+from rich.console import Console as RichConsole
 from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress
@@ -29,13 +31,11 @@ async def check_premium_status(app, console, db=None, rate_limiter=None):
     else:
         status = "[bold red]Inactive[/bold red] — No Telegram Premium"
 
-    console.print(Panel(
+    console.print(
         f"Account: [cyan]{me.first_name or ''} {me.last_name or ''}[/cyan]\n"
         f"Username: [cyan]@{me.username or '—'}[/cyan]\n"
-        f"Premium: {status}",
-        title="[bold cyan]Premium Status[/]",
-        border_style="cyan",
-    ))
+        f"Premium: {status}"
+    )
     log.info("Premium check: %s (premium=%s)", me.username, me.is_premium)
 
 
@@ -54,11 +54,7 @@ async def check_spam_status(app, console, db=None, rate_limiter=None):
         await asyncio.sleep(2)
         async for msg in app.get_chat_history("SpamBot", limit=1):
             if not msg.outgoing:
-                console.print(Panel(
-                    msg.text or "[no response]",
-                    title="[bold cyan]@SpamBot[/]",
-                    border_style="cyan",
-                ))
+                console.print(f"[bold cyan]@SpamBot:[/] {msg.text or '[no response]'}")
                 log.info("Spam check result: %s", (msg.text or "")[:80])
                 return
 
@@ -79,30 +75,19 @@ async def fetch_all_groups(app, console, db=None, rate_limiter=None):
         console.print("[red]No groups found.[/]")
         return
 
-    table = Table(title=f"All Joined Groups ({len(groups)})")
-    table.add_column("#", style="dim", width=4)
-    table.add_column("Title", style="cyan")
-    table.add_column("Username", style="green")
-    table.add_column("Type", style="yellow")
-    table.add_column("Members", justify="right")
-
+    # Print as simple list (works with both Console and OutputAdapter)
+    console.print(f"[bold cyan]All Joined Groups ({len(groups)})[/]")
     for i, chat in enumerate(groups, 1):
-        table.add_row(
-            str(i),
-            chat.title or "—",
-            f"@{chat.username}" if chat.username else "—",
-            chat.type.name,
-            str(chat.members_count or 0),
-        )
+        uname = f"@{chat.username}" if chat.username else "—"
+        console.print(f"  {i}. {chat.title or '—'} ({uname}) [{chat.type.name}] — {chat.members_count or 0} members")
 
-    console.print(table)
     log.info("Fetched %d groups total", len(groups))
 
 
 async def find_and_leave_restricted(app, console, db=None, rate_limiter=None):
+    """Find groups where user can't send messages and offer to leave."""
     db = db or _default_db
     rate_limiter = rate_limiter or _default_rate_limiter
-    """Find groups where user can't send messages and offer to leave."""
     console.print("[yellow]Fetching groups...[/]")
 
     groups = []
@@ -117,36 +102,30 @@ async def find_and_leave_restricted(app, console, db=None, rate_limiter=None):
 
     console.print(f"[yellow]Checking send permissions for {len(groups)} groups...[/]")
 
+    _has_progress = isinstance(console, RichConsole)
     restricted = []
-    with Progress(console=console) as progress:
-        task = progress.add_task("[yellow]Checking...", total=len(groups))
-        for chat in groups:
+    progress_cm = Progress(console=console) if _has_progress else contextlib.nullcontext()
+    with progress_cm as progress:
+        task = progress.add_task("[yellow]Checking...", total=len(groups)) if progress else None
+        for i, chat in enumerate(groups):
             try:
                 if not await _check_can_send(app, chat, rate_limiter=rate_limiter):
                     restricted.append(chat)
             except Exception as e:
                 log.debug("Error checking %s: %s", chat.title, e)
-            progress.advance(task)
+            if progress:
+                progress.advance(task)
+            elif (i + 1) % 10 == 0:
+                console.print(f"[dim]Checked {i+1}/{len(groups)}...[/]")
 
     if not restricted:
         console.print("[green]All groups allow sending messages.[/]")
         return
 
-    table = Table(title=f"Restricted Groups ({len(restricted)})")
-    table.add_column("#", style="dim", width=4)
-    table.add_column("Title", style="cyan")
-    table.add_column("Username", style="green")
-    table.add_column("Type", style="yellow")
-
+    console.print(f"[yellow]Found {len(restricted)} restricted group(s):[/]")
     for i, chat in enumerate(restricted, 1):
-        table.add_row(
-            str(i),
-            chat.title or "—",
-            f"@{chat.username}" if chat.username else "—",
-            chat.type.name,
-        )
-
-    console.print(table)
+        uname = f"@{chat.username}" if chat.username else "—"
+        console.print(f"  {i}. {chat.title or '—'} ({uname}) [{chat.type.name}]")
 
     selection = Prompt.ask(
         "[cyan]Select groups to leave (comma-separated numbers or 'all')[/]"
@@ -206,10 +185,12 @@ async def _leave_groups(app, groups, console, db=None, rate_limiter=None):
     db = db or _default_db
     rate_limiter = rate_limiter or _default_rate_limiter
     left = 0
+    _has_progress = isinstance(console, RichConsole)
 
-    with Progress(console=console) as progress:
-        task = progress.add_task("[red]Leaving...", total=len(groups))
-        for chat in groups:
+    progress_cm = Progress(console=console) if _has_progress else contextlib.nullcontext()
+    with progress_cm as progress:
+        task = progress.add_task("[red]Leaving...", total=len(groups)) if progress else None
+        for i, chat in enumerate(groups):
             try:
                 await rate_limiter.call(lambda c=chat: app.leave_chat(c.id), console)
                 db.remove_group(chat.id)
@@ -217,7 +198,8 @@ async def _leave_groups(app, groups, console, db=None, rate_limiter=None):
                 left += 1
             except RPCError as e:
                 console.print(f"  [red]✗ Failed: {chat.title} — {e}[/]")
-            progress.advance(task)
+            if progress:
+                progress.advance(task)
 
     log.info("Left %d/%d restricted groups", left, len(groups))
     console.print(f"\n[green]Left {left}/{len(groups)} groups.[/]")

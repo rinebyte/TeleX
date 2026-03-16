@@ -64,22 +64,27 @@ def load_config(env_path=None) -> dict:
 
 
 # --- Standalone globals (backward compatible) ---
+# Wrapped in try/except so `from config import parse_proxy` works even without .env
+# (needed by the multi-instance installer which loads per-instance .env files)
 load_dotenv()
 
-API_ID = os.getenv("API_ID", "").strip()
-API_HASH = os.getenv("API_HASH", "").strip()
-PHONE_NUMBER = os.getenv("PHONE_NUMBER", "").strip()
+_api_id = os.getenv("API_ID", "").strip()
+_api_hash = os.getenv("API_HASH", "").strip()
+_phone = os.getenv("PHONE_NUMBER", "").strip()
+_proxy_url = os.getenv("PROXY_URL", "").strip()
 
-PROXY_URL = os.getenv("PROXY_URL", "").strip()  # socks5://user:pass@host:port
-
-if not API_ID or not API_HASH or not PHONE_NUMBER:
-    raise ValueError(
-        "Missing credentials. Set API_ID, API_HASH, and PHONE_NUMBER in .env"
-    )
-
-API_ID = int(API_ID)
-
-PROXY = parse_proxy(PROXY_URL)
+if _api_id and _api_hash and _phone:
+    API_ID = int(_api_id)
+    API_HASH = _api_hash
+    PHONE_NUMBER = _phone
+    PROXY_URL = _proxy_url
+    PROXY = parse_proxy(_proxy_url)
+else:
+    API_ID = None
+    API_HASH = None
+    PHONE_NUMBER = None
+    PROXY_URL = ""
+    PROXY = None
 
 # Delays in seconds
 BLAST_DELAY = 3

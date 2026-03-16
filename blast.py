@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import logging
 import re
 
 from pyrogram.errors import ChatWriteForbidden, FloodWait, RPCError, SlowmodeWait, UserBannedInChannel
+from rich.console import Console as RichConsole
 from rich.table import Table
 from rich.progress import Progress
 from rich.prompt import Prompt, Confirm
@@ -50,11 +52,13 @@ async def blast_message(app, targets: list[SavedGroup], text: str, console, db=N
     sent = 0
     lock = asyncio.Lock()
     banned = asyncio.Event()
+    _has_progress = isinstance(console, RichConsole)
 
-    async def _send_one(g, progress, task):
+    async def _send_one(g, progress=None, task=None):
         nonlocal sent
         if banned.is_set():
-            progress.advance(task)
+            if progress:
+                progress.advance(task)
             return
         try:
             await rate_limiter.call(lambda g=g: app.send_message(_chat_target(g), text), console)
@@ -71,13 +75,17 @@ async def blast_message(app, targets: list[SavedGroup], text: str, console, db=N
             console.print(f"  [yellow]⏭ Slow mode ({e.value}s): {g['title']} — skipped[/]")
         except (FloodWait, RPCError) as e:
             console.print(f"  [red]✗ Failed: {g['title']} — {e}[/]")
-        progress.advance(task)
+        if progress:
+            progress.advance(task)
 
-    with Progress(console=console) as progress:
-        task = progress.add_task("[green]Blasting...", total=len(targets))
+    progress_cm = Progress(console=console) if _has_progress else contextlib.nullcontext()
+    with progress_cm as progress:
+        task = progress.add_task("[green]Blasting...", total=len(targets)) if progress else None
         for i in range(0, len(targets), BLAST_BATCH_SIZE):
             batch = targets[i:i + BLAST_BATCH_SIZE]
             await asyncio.gather(*[_send_one(g, progress, task) for g in batch])
+            if not _has_progress:
+                console.print(f"[dim]Progress: {min(i + BLAST_BATCH_SIZE, len(targets))}/{len(targets)}[/]")
             if i + BLAST_BATCH_SIZE < len(targets):
                 await asyncio.sleep(rate_limiter.get_delay(BLAST_DELAY))
 
@@ -94,11 +102,13 @@ async def blast_copy(app, targets: list[SavedGroup], from_chat, message_id: int,
     sent = 0
     lock = asyncio.Lock()
     banned = asyncio.Event()
+    _has_progress = isinstance(console, RichConsole)
 
-    async def _copy_one(g, progress, task):
+    async def _copy_one(g, progress=None, task=None):
         nonlocal sent
         if banned.is_set():
-            progress.advance(task)
+            if progress:
+                progress.advance(task)
             return
         try:
             await rate_limiter.call(
@@ -118,13 +128,17 @@ async def blast_copy(app, targets: list[SavedGroup], from_chat, message_id: int,
             console.print(f"  [yellow]⏭ Slow mode ({e.value}s): {g['title']} — skipped[/]")
         except (FloodWait, RPCError) as e:
             console.print(f"  [red]✗ Failed: {g['title']} — {e}[/]")
-        progress.advance(task)
+        if progress:
+            progress.advance(task)
 
-    with Progress(console=console) as progress:
-        task = progress.add_task("[green]Blasting...", total=len(targets))
+    progress_cm = Progress(console=console) if _has_progress else contextlib.nullcontext()
+    with progress_cm as progress:
+        task = progress.add_task("[green]Blasting...", total=len(targets)) if progress else None
         for i in range(0, len(targets), BLAST_BATCH_SIZE):
             batch = targets[i:i + BLAST_BATCH_SIZE]
             await asyncio.gather(*[_copy_one(g, progress, task) for g in batch])
+            if not _has_progress:
+                console.print(f"[dim]Progress: {min(i + BLAST_BATCH_SIZE, len(targets))}/{len(targets)}[/]")
             if i + BLAST_BATCH_SIZE < len(targets):
                 await asyncio.sleep(rate_limiter.get_delay(BLAST_DELAY))
 

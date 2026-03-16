@@ -142,6 +142,10 @@ class TeleXInstance:
 
 
 async def main():
+    if API_ID is None:
+        console.print("[red]Missing credentials. Set API_ID, API_HASH, and PHONE_NUMBER in .env[/]")
+        return
+
     console.print(Panel(BANNER, border_style="cyan"))
 
     db.init_db()

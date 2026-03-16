@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import logging
 
 from pyrogram import enums, raw
 from pyrogram.errors import FloodWait, RPCError
+from rich.console import Console as RichConsole
 from rich.table import Table
 from rich.progress import Progress
 from rich.prompt import Prompt, Confirm
@@ -74,8 +76,9 @@ async def join_groups(app, groups: list[GroupData], console, db=None, rate_limit
     rate_limiter = rate_limiter or _default_rate_limiter
     joined = 0
     lock = asyncio.Lock()
+    _has_progress = isinstance(console, RichConsole)
 
-    async def _join_one(g, progress, task):
+    async def _join_one(g, progress=None, task=None):
         nonlocal joined
         try:
             await rate_limiter.call(lambda g=g: app.join_chat(g["username"]), console)
@@ -85,16 +88,20 @@ async def join_groups(app, groups: list[GroupData], console, db=None, rate_limit
                 joined += 1
         except (FloodWait, RPCError) as e:
             console.print(f"  [red]✗ Failed: {g['title']} — {e}[/]")
-        progress.advance(task)
+        if progress:
+            progress.advance(task)
 
-    with Progress(console=console) as progress:
-        task = progress.add_task("[green]Joining groups...", total=len(groups))
+    progress_cm = Progress(console=console) if _has_progress else contextlib.nullcontext()
+    with progress_cm as progress:
+        task = progress.add_task("[green]Joining groups...", total=len(groups)) if progress else None
         i = 0
         while i < len(groups):
             bs = rate_limiter.batch_size
             batch = groups[i:i + bs]
             await asyncio.gather(*[_join_one(g, progress, task) for g in batch])
             i += bs
+            if not _has_progress:
+                console.print(f"[dim]Progress: {min(i, len(groups))}/{len(groups)}[/]")
             if i < len(groups):
                 await asyncio.sleep(rate_limiter.get_delay(JOIN_DELAY))
 
