@@ -63,28 +63,35 @@ def load_config(env_path=None) -> dict:
     }
 
 
-# --- Standalone globals (backward compatible) ---
-# Wrapped in try/except so `from config import parse_proxy` works even without .env
-# (needed by the multi-instance installer which loads per-instance .env files)
-load_dotenv()
+# --- Standalone globals ---
+# NOT loaded at import time. Call init() first (main.py does this).
+# This prevents the installer from needing a .env in the CWD.
+API_ID = None
+API_HASH = None
+PHONE_NUMBER = None
+PROXY_URL = ""
+PROXY = None
+_initialized = False
 
-_api_id = os.getenv("API_ID", "").strip()
-_api_hash = os.getenv("API_HASH", "").strip()
-_phone = os.getenv("PHONE_NUMBER", "").strip()
-_proxy_url = os.getenv("PROXY_URL", "").strip()
 
-if _api_id and _api_hash and _phone:
-    API_ID = int(_api_id)
-    API_HASH = _api_hash
-    PHONE_NUMBER = _phone
-    PROXY_URL = _proxy_url
-    PROXY = parse_proxy(_proxy_url)
-else:
-    API_ID = None
-    API_HASH = None
-    PHONE_NUMBER = None
-    PROXY_URL = ""
-    PROXY = None
+def init():
+    """Load .env and populate module-level globals. Only needed for standalone mode."""
+    global API_ID, API_HASH, PHONE_NUMBER, PROXY_URL, PROXY, _initialized
+    if _initialized:
+        return
+    _initialized = True
+    load_dotenv()
+    _api_id = os.getenv("API_ID", "").strip()
+    _api_hash = os.getenv("API_HASH", "").strip()
+    _phone = os.getenv("PHONE_NUMBER", "").strip()
+    _proxy_url = os.getenv("PROXY_URL", "").strip()
+    if _api_id and _api_hash and _phone:
+        API_ID = int(_api_id)
+        API_HASH = _api_hash
+        PHONE_NUMBER = _phone
+        PROXY_URL = _proxy_url
+        PROXY = parse_proxy(_proxy_url)
+
 
 # Delays in seconds
 BLAST_DELAY = 3

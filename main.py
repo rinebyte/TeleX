@@ -14,6 +14,8 @@ from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+import config
+config.init()  # Load .env into module globals
 from config import API_ID, API_HASH, PHONE_NUMBER, SLEEP_THRESHOLD, PROXY, load_config, parse_proxy
 from db import Database
 from ratelimit import RateLimitState
