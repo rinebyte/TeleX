@@ -1,6 +1,7 @@
 """Adapter that bridges Rich Console.print() / Prompt.ask() to Textual RichLog / Input widgets."""
 
 import asyncio
+from collections.abc import Callable
 
 from rich.console import Console
 from rich.text import Text
@@ -9,11 +10,12 @@ from rich.text import Text
 class OutputAdapter:
     """Wraps either a Console (standalone) or a RichLog (Textual) for unified output/input."""
 
-    def __init__(self, rich_log=None, console=None):
+    def __init__(self, rich_log=None, console=None, on_ask: Callable[[str], None] | None = None):
         self._rich_log = rich_log
         self._console = console or Console()
         self._input_future: asyncio.Future | None = None
         self._input_prompt: str = ""
+        self.on_ask = on_ask
 
     def print(self, *args, **kwargs):
         if self._rich_log is not None:
@@ -37,7 +39,15 @@ class OutputAdapter:
 
             loop = asyncio.get_running_loop()
             self._input_future = loop.create_future()
-            result = await self._input_future
+
+            if self.on_ask:
+                self.on_ask(f"{prompt}{suffix}")
+
+            try:
+                result = await self._input_future
+            except asyncio.CancelledError:
+                self._input_future = None
+                raise
             self._input_future = None
             return result
         else:

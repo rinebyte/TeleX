@@ -6,7 +6,7 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Header, TabbedContent, TabPane, Static
+from textual.widgets import Footer, Header, Input, TabbedContent, TabPane, Static
 
 # Ensure TeleX project root is importable
 _project_root = str(Path(__file__).resolve().parent.parent)
@@ -36,9 +36,9 @@ class TeleXApp(App):
     """
 
     BINDINGS = [
-        Binding("n", "new_instance", "New Instance"),
-        Binding("d", "delete_instance", "Delete Instance"),
-        Binding("q", "quit", "Quit"),
+        Binding("ctrl+n", "new_instance", "New Instance"),
+        Binding("ctrl+d", "delete_instance", "Delete Instance"),
+        Binding("ctrl+q", "quit", "Quit"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -62,7 +62,7 @@ class TeleXApp(App):
             Static(
                 "[bold cyan]TeleX Multi-Instance[/]\n\n"
                 "No instances configured yet.\n"
-                "Press [bold]n[/] to add a new instance.",
+                "Press [bold]Ctrl+N[/] to add a new instance.",
                 id="welcome",
             )
         )
@@ -132,6 +132,14 @@ class TeleXApp(App):
         # Show welcome if no instances left
         if not self._tab_to_name:
             self._show_welcome()
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Focus the Input widget in the newly activated tab."""
+        try:
+            inp = event.pane.query_one(Input)
+            inp.focus()
+        except Exception:
+            pass
 
     def action_quit(self) -> None:
         self.exit()

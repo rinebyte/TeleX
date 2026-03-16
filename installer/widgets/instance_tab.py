@@ -8,7 +8,7 @@ from pathlib import Path
 from textual import on, work
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Input, RichLog, Static, TabbedContent, TabPane
 
 # Ensure TeleX project root is importable
 _project_root = str(Path(__file__).resolve().parent.parent.parent)
@@ -49,6 +49,7 @@ class InstanceTab(Vertical):
         self.config = config
         self.adapter: OutputAdapter | None = None
         self._status = "disconnected"
+        self._client = None
 
     def compose(self) -> ComposeResult:
         yield Static(f"[dim]{self.config.name}[/] — disconnected", id="status-bar")
@@ -57,8 +58,43 @@ class InstanceTab(Vertical):
 
     def on_mount(self) -> None:
         rich_log = self.query_one("#output", RichLog)
-        self.adapter = OutputAdapter(rich_log=rich_log)
+        self.adapter = OutputAdapter(rich_log=rich_log, on_ask=self._on_ask_callback)
         self._start_instance()
+
+    def _on_ask_callback(self, prompt: str) -> None:
+        """Called when adapter.ask() fires — focus input and set placeholder."""
+        try:
+            inp = self.query_one("#input", Input)
+            inp.placeholder = prompt
+            inp.focus()
+        except Exception:
+            pass
+
+    def on_unmount(self) -> None:
+        """Cancel workers and stop the Pyrogram client on tab removal / app quit."""
+        # Cancel all running workers for this widget
+        for worker in self.workers:
+            worker.cancel()
+        # Stop the client with a timeout
+        if self._client is not None:
+            client = self._client
+            self._client = None
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._stop_client_with_timeout(client, timeout=5.0))
+            except RuntimeError:
+                pass
+
+    @staticmethod
+    async def _stop_client_with_timeout(client, timeout: float = 5.0):
+        """Stop a Pyrogram client with a timeout so it doesn't hang."""
+        try:
+            await asyncio.wait_for(client.stop(), timeout=timeout)
+        except (asyncio.TimeoutError, Exception):
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
     def _update_status(self, status: str, style: str = ""):
         self._status = status
@@ -69,6 +105,34 @@ class InstanceTab(Vertical):
             label += status
         try:
             self.query_one("#status-bar", Static).update(label)
+        except Exception:
+            pass
+        # Update tab pane label with status dot
+        self._update_tab_label(status)
+
+    def _update_tab_label(self, status: str) -> None:
+        """Update the parent TabPane label with a colored status dot."""
+        dot_map = {
+            "connected": "[green]●[/green]",
+            "connecting": "[yellow]●[/yellow]",
+            "error": "[red]●[/red]",
+            "disconnected": "[dim]○[/dim]",
+        }
+        dot = dot_map.get(status, "[dim]○[/dim]")
+        # Walk up to find the TabPane, then the TabbedContent
+        pane = None
+        node = self.parent
+        while node is not None:
+            if isinstance(node, TabPane):
+                pane = node
+                break
+            node = node.parent
+        if pane is None:
+            return
+        try:
+            tabs = self.screen.query_one(TabbedContent)
+            tab = tabs.get_tab(pane.id)
+            tab.label = f"{dot} {self.config.name}"
         except Exception:
             pass
 
@@ -102,6 +166,7 @@ class InstanceTab(Vertical):
             sleep_threshold=SLEEP_THRESHOLD,
             **proxy_kwargs,
         )
+        self._client = client
 
         try:
             # Use connect() instead of start() to avoid blocking input() on first login
@@ -116,6 +181,7 @@ class InstanceTab(Vertical):
                 except RPCError as e:
                     self.adapter.print(f"[red]Failed to send code: {e}[/]")
                     await client.disconnect()
+                    self._client = None
                     self._update_status("error", "red")
                     return
 
@@ -145,9 +211,17 @@ class InstanceTab(Vertical):
                 pass
             await client.initialize()
 
+        except asyncio.CancelledError:
+            self._client = None
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            raise
         except Exception as e:
             self.adapter.print(f"[red]Failed to connect: {e}[/]")
             self._update_status("error", "red")
+            self._client = None
             try:
                 await client.disconnect()
             except Exception:
@@ -171,15 +245,19 @@ class InstanceTab(Vertical):
         # Run menu loop
         try:
             await self._menu_loop(client, database, rate_limiter)
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             self.adapter.print(f"[red]Error: {e}[/]")
             log.exception("Menu loop error for %s", self.config.name)
         finally:
+            self._client = None
             try:
                 await client.stop()
             except Exception:
                 pass
             self._update_status("disconnected", "dim")
+            self.adapter.print("[dim]Type 'reconnect' to retry.[/]")
 
     async def _menu_loop(self, client, database, rate_limiter):
         """Interactive menu driven by the OutputAdapter."""
@@ -346,8 +424,24 @@ class InstanceTab(Vertical):
         """Forward input to the OutputAdapter."""
         value = event.value
         event.input.clear()
+        event.input.placeholder = "Enter command..."
         if self.adapter and self.adapter.waiting_for_input:
             # Echo the input
             rich_log = self.query_one("#output", RichLog)
             rich_log.write(f"[bold]> {value}[/]")
             self.adapter.submit_input(value)
+        else:
+            # Handle reconnect command
+            if value.strip().lower() == "reconnect" and self._status == "disconnected":
+                # Guard: don't reconnect if a worker is still running
+                has_running = any(not w.is_finished for w in self.workers)
+                if not has_running:
+                    rich_log = self.query_one("#output", RichLog)
+                    rich_log.write("[bold]> reconnect[/]")
+                    self._start_instance()
+                else:
+                    rich_log = self.query_one("#output", RichLog)
+                    rich_log.write("[dim]Worker still running, please wait...[/]")
+            elif value.strip():
+                rich_log = self.query_one("#output", RichLog)
+                rich_log.write("[dim]No prompt active[/]")
