@@ -1,5 +1,6 @@
 """TeleX Multi-Instance Installer — Textual TUI App."""
 
+import re
 import sys
 from pathlib import Path
 
@@ -72,7 +73,9 @@ class TeleXApp(App):
             tabs.remove_pane("welcome-tab")
         except Exception:
             pass
-        tab_id = f"tab-{config.name}"
+        # Sanitize name to valid Textual ID (letters, numbers, hyphens, underscores only)
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", config.name)
+        tab_id = f"tab-{safe_name}"
         pane = TabPane(config.name, id=tab_id)
         pane.compose_add_child(InstanceTab(config))
         tabs.add_pane(pane)
