@@ -1,0 +1,32 @@
+# Secrets & session
+.env
+*.session
+*.session-journal
+
+# Database
+telex.db
+telex.db-shm
+telex.db-wal
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
